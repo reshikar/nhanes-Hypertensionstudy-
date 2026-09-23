@@ -1,0 +1,743 @@
+library(haven)
+
+# Find only the NHANES 2021-2023 "_L" files
+files <- list.files(
+  "~/Downloads",
+  pattern = "_L\\.xpt$",
+  full.names = TRUE
+)
+
+# Import them
+nhanes <- lapply(files, read_xpt)
+
+# Name the datasets
+names(nhanes) <- tools::file_path_sans_ext(basename(files))
+
+# Check
+names(nhanes)
+sapply(nhanes, function(x) "SEQN" %in% names(x))
+
+
+data.frame(
+  dataset = names(nhanes),
+  rows = sapply(nhanes, nrow),
+  unique_SEQN = sapply(nhanes, function(x) length(unique(x$SEQN)))
+)
+# ---------------------------------------------------------
+# Merge NHANES Datasets
+# ---------------------------------------------------------
+
+# We use the demographic dataset (DEMO_L) as the base dataset
+# because it contains the largest set of participants.
+# The remaining NHANES components are merged using SEQN,
+# the unique participant identifier shared across the datasets.
+#
+# A left join is used to retain all participants in DEMO_L,
+# even if they are missing information from another component.
+
+library(dplyr)
+
+nhanes_merged <- nhanes$DEMO_L %>%
+  left_join(nhanes$BMX_L,  by = "SEQN") %>%   # Body measurements
+  left_join(nhanes$BPXO_L, by = "SEQN") %>%   # Measured blood pressure
+  left_join(nhanes$BPQ_L,  by = "SEQN") %>%   # Blood pressure questionnaire
+  left_join(nhanes$DIQ_L,  by = "SEQN") %>%   # Diabetes questionnaire
+  left_join(nhanes$PAQ_L,  by = "SEQN") %>%   # Physical activity
+  left_join(nhanes$SMQ_L,  by = "SEQN")       # Smoking
+
+# Check the dimensions of the merged dataset
+dim(nhanes_merged)
+
+# Confirm that SEQN remains unique after merging
+n_distinct(nhanes_merged$SEQN)
+
+# ---------------------------------------------------------
+# Verify the Merged Dataset
+# ---------------------------------------------------------
+
+# Check the number of participants and variables.
+# The merged dataset contains 11,933 participants and 87 variables.
+dim(nhanes_merged)
+
+# Confirm that each participant still appears only once.
+# The number of unique SEQN values should equal the number of rows.
+n_distinct(nhanes_merged$SEQN)
+
+# Result:
+# 11,933 rows
+# 87 variables
+# 11,933 unique participants
+
+# ---------------------------------------------------------
+# Inspect Variables for Analysis
+# ---------------------------------------------------------
+
+# Review all variable names in the merged dataset.
+# This will help identify variables needed to define
+# hypertension and potential demographic and behavioral
+# risk factors.
+
+names(nhanes_merged)
+
+
+
+# ---------------------------------------------------------
+# Select Variables for Hypertension Analysis
+# ---------------------------------------------------------
+
+# Create a smaller analytic dataset containing variables
+# relevant to hypertension, demographic characteristics,
+# cardiometabolic risk factors, health behaviors, and
+# the NHANES complex survey design.
+
+analysis_data <- nhanes_merged %>%
+  select(
+    # Participant identifier
+    SEQN,
+    
+    # Demographics
+    RIDAGEYR,       # Age in years
+    RIAGENDR,       # Sex
+    RIDRETH3,       # Race/ethnicity
+    DMDEDUC2,       # Education
+    INDFMPIR,       # Family income-to-poverty ratio
+    
+    # Body measurements
+    BMXBMI,         # Body mass index (BMI)
+    BMXWAIST,       # Waist circumference
+    
+    # Measured blood pressure
+    BPXOSY1, BPXODI1,
+    BPXOSY2, BPXODI2,
+    BPXOSY3, BPXODI3,
+    
+    # Blood pressure questionnaire
+    BPQ020,         # Ever told had high blood pressure
+    BPQ030,         # Told on multiple occasions
+    
+    # Diabetes
+    DIQ010,         # Doctor told participant they have diabetes
+    
+    # Physical activity
+    PAD680,         # Sedentary time
+    
+    # Smoking
+    SMQ020,         # Smoked at least 100 cigarettes in life
+    SMQ040,         # Current smoking status
+    
+    # NHANES survey design variables
+    WTMEC2YR,       # MEC examination weight
+    SDMVSTRA,       # Survey stratum
+    SDMVPSU         # Primary sampling unit
+  )
+
+# Check the new analytic dataset
+dim(analysis_data)
+
+# View selected variable names
+names(analysis_data)
+
+
+# ---------------------------------------------------------
+# Inspect Variable Labels and Coding
+# ---------------------------------------------------------
+
+# View the descriptive labels attached to the selected variables.
+# This helps verify the meaning of each variable before recoding.
+
+sapply(analysis_data, function(x) attr(x, "label"))
+
+# Examine values used for demographic and health variables
+
+table(analysis_data$RIAGENDR, useNA = "ifany")
+table(analysis_data$RIDRETH3, useNA = "ifany")
+table(analysis_data$DMDEDUC2, useNA = "ifany")
+
+table(analysis_data$BPQ020, useNA = "ifany")
+table(analysis_data$BPQ030, useNA = "ifany")
+
+table(analysis_data$DIQ010, useNA = "ifany")
+
+table(analysis_data$SMQ020, useNA = "ifany")
+table(analysis_data$SMQ040, useNA = "ifany")
+
+
+# ---------------------------------------------------------
+# Define Adult Analytic Sample
+# ---------------------------------------------------------
+
+# Restrict the analysis to adults aged 20 years or older.
+# This age restriction is used because the selected education
+# variable (DMDEDUC2) is defined for adults aged 20+.
+
+adult_data <- analysis_data %>%
+  filter(RIDAGEYR >= 20)
+
+# Compare the full and adult samples
+nrow(analysis_data)
+nrow(adult_data)
+
+# Examine age distribution in the adult sample
+summary(adult_data$RIDAGEYR)
+# ---------------------------------------------------------
+# Check Availability of Blood Pressure Measurements
+# ---------------------------------------------------------
+
+# Count adults with at least one valid systolic BP measurement.
+# Participants may have up to three oscillometric BP readings.
+
+sum(
+  !is.na(adult_data$BPXOSY1) |
+    !is.na(adult_data$BPXOSY2) |
+    !is.na(adult_data$BPXOSY3)
+)
+
+# Count adults with no systolic BP measurements
+sum(
+  is.na(adult_data$BPXOSY1) &
+    is.na(adult_data$BPXOSY2) &
+    is.na(adult_data$BPXOSY3)
+)
+
+
+# Check age distribution
+summary(adult_data$RIDAGEYR)
+
+
+# Adults with at least one systolic BP measurement
+sum(
+  !is.na(adult_data$BPXOSY1) |
+    !is.na(adult_data$BPXOSY2) |
+    !is.na(adult_data$BPXOSY3)
+)
+
+
+# ---------------------------------------------------------
+# Calculate Average Blood Pressure
+# ---------------------------------------------------------
+
+# Calculate each participant's average systolic and diastolic
+# blood pressure using all available oscillometric readings.
+
+adult_data <- adult_data %>%
+  rowwise() %>%
+  mutate(
+    mean_sbp = mean(c_across(c(BPXOSY1, BPXOSY2, BPXOSY3)),
+                    na.rm = TRUE),
+    mean_dbp = mean(c_across(c(BPXODI1, BPXODI2, BPXODI3)),
+                    na.rm = TRUE)
+  ) %>%
+  ungroup()
+
+# Participants with no valid BP readings produce NaN.
+# Convert these values to standard missing values (NA).
+
+adult_data <- adult_data %>%
+  mutate(
+    mean_sbp = ifelse(is.nan(mean_sbp), NA, mean_sbp),
+    mean_dbp = ifelse(is.nan(mean_dbp), NA, mean_dbp)
+  )
+
+# Examine the distributions of the calculated BP measures
+summary(adult_data$mean_sbp)
+summary(adult_data$mean_dbp)
+# ---------------------------------------------------------
+# Inspect Blood Pressure Questionnaire Variables
+# ---------------------------------------------------------
+
+# Display the names and descriptions of all variables
+# contained in the NHANES blood pressure questionnaire.
+
+data.frame(
+  variable = names(nhanes$BPQ_L),
+  label = sapply(nhanes$BPQ_L, function(x) attr(x, "label"))
+)
+
+
+# Add antihypertensive medication use to the analytic dataset
+adult_data <- adult_data %>%
+  left_join(
+    nhanes$BPQ_L %>% select(SEQN, BPQ150),
+    by = "SEQN"
+  )
+
+# Check the variable
+table(adult_data$BPQ150, useNA = "ifany")
+
+attr(adult_data$BPQ150, "label")
+
+
+# ---------------------------------------------------------
+# Inspect Antihypertensive Medication Coding
+# ---------------------------------------------------------
+
+# Compare BPQ150 with the preceding hypertension questions
+# to understand its skip pattern and coding.
+
+table(adult_data$BPQ150, useNA = "ifany")
+
+table(
+  adult_data$BPQ020,
+  adult_data$BPQ150,
+  useNA = "ifany"
+)
+
+# ---------------------------------------------------------
+# Recode Antihypertensive Medication Use
+# ---------------------------------------------------------
+
+# BPQ150:
+# 1 = Yes
+# 2 = No
+# 7 = Refused
+# 9 = Don't know
+#
+# BPQ150 is only asked of participants who reported having
+# been told that they had high blood pressure.
+#
+# Participants who answered "No" to BPQ020 therefore have
+# structural missing values for BPQ150.
+
+adult_data <- adult_data %>%
+  mutate(
+    bp_medication = case_when(
+      BPQ150 == 1 ~ 1,                 # Currently taking BP medication
+      BPQ150 == 2 ~ 0,                 # Not taking BP medication
+      BPQ020 == 2 ~ 0,                 # Never diagnosed; BPQ150 skipped
+      TRUE ~ NA_real_                  # Refused, don't know, or other missing
+    )
+  )
+
+# Check the new variable
+table(adult_data$bp_medication, useNA = "ifany")
+
+# ---------------------------------------------------------
+# Define Hypertension Outcome
+# ---------------------------------------------------------
+
+# Hypertension is defined as:
+#   - Mean systolic blood pressure >= 130 mmHg, OR
+#   - Mean diastolic blood pressure >= 80 mmHg, OR
+#   - Current use of antihypertensive medication.
+#
+# Participants without BP measurements can still be classified
+# as hypertensive if they report taking BP medication.
+# Otherwise, participants without sufficient information remain NA.
+
+adult_data <- adult_data %>%
+  mutate(
+    hypertension = case_when(
+      mean_sbp >= 130 ~ 1,
+      mean_dbp >= 80 ~ 1,
+      bp_medication == 1 ~ 1,
+      
+      !is.na(mean_sbp) & !is.na(mean_dbp) &
+        bp_medication == 0 ~ 0,
+      
+      TRUE ~ NA_real_
+    )
+  )
+
+# Examine the hypertension outcome
+table(adult_data$hypertension, useNA = "ifany")
+
+prop.table(
+  table(adult_data$hypertension)
+) * 100
+
+
+
+
+# ---------------------------------------------------------
+# NHANES Complex Survey Design
+# ---------------------------------------------------------
+install.packages("minqa", type = "binary")
+install.packages("survey", type = "binary")
+
+library(survey)
+
+# NHANES uses a complex, multistage probability sampling design.
+# MEC examination weights, strata, and PSU variables are used
+# to obtain nationally representative estimates.
+
+nhanes_design <- svydesign(
+  ids = ~SDMVPSU,
+  strata = ~SDMVSTRA,
+  weights = ~WTMEC2YR,
+  nest = TRUE,
+  data = adult_data
+)
+
+# Estimate survey-weighted hypertension prevalence
+svymean(
+  ~hypertension,
+  design = subset(nhanes_design, !is.na(hypertension)),
+  na.rm = TRUE
+)
+
+# ---------------------------------------------------------
+# Survey-Weighted Hypertension Prevalence
+# ---------------------------------------------------------
+
+# Estimate nationally representative hypertension prevalence
+htn_prevalence <- svymean(
+  ~hypertension,
+  design = subset(nhanes_design, !is.na(hypertension)),
+  na.rm = TRUE
+)
+
+# Display prevalence estimate
+htn_prevalence
+
+# Calculate 95% confidence interval
+confint(htn_prevalence)
+
+
+
+# ---------------------------------------------------------
+# Create Demographic Variables
+# ---------------------------------------------------------
+
+adult_data <- adult_data %>%
+  mutate(
+    
+    # Sex
+    sex = case_when(
+      RIAGENDR == 1 ~ "Male",
+      RIAGENDR == 2 ~ "Female",
+      TRUE ~ NA_character_
+    ),
+    
+    # Age groups
+    age_group = case_when(
+      RIDAGEYR >= 20 & RIDAGEYR <= 39 ~ "20-39",
+      RIDAGEYR >= 40 & RIDAGEYR <= 59 ~ "40-59",
+      RIDAGEYR >= 60 ~ "60+",
+      TRUE ~ NA_character_
+    )
+  )
+
+# ---------------------------------------------------------
+# Recode Clinical and Behavioral Risk Factors
+# ---------------------------------------------------------
+
+adult_data <- adult_data %>%
+  mutate(
+    
+    # BMI category based on measured BMI (kg/m^2)
+    bmi_category = case_when(
+      BMXBMI < 18.5 ~ "Underweight",
+      BMXBMI >= 18.5 & BMXBMI < 25 ~ "Normal weight",
+      BMXBMI >= 25 & BMXBMI < 30 ~ "Overweight",
+      BMXBMI >= 30 ~ "Obesity",
+      TRUE ~ NA_character_
+    ),
+    
+    # Diabetes status
+    # DIQ010: 1 = Yes, 2 = No, 3 = Borderline
+    diabetes = case_when(
+      DIQ010 == 1 ~ "Yes",
+      DIQ010 %in% c(2, 3) ~ "No",
+      TRUE ~ NA_character_
+    ),
+    
+    # Smoking status
+    # Never smoker: has not smoked 100 cigarettes in lifetime
+    # Former smoker: smoked 100+ cigarettes but does not currently smoke
+    # Current smoker: currently smokes every day or some days
+    smoking_status = case_when(
+      SMQ020 == 2 ~ "Never",
+      SMQ020 == 1 & SMQ040 == 3 ~ "Former",
+      SMQ020 == 1 & SMQ040 %in% c(1, 2) ~ "Current",
+      TRUE ~ NA_character_
+    )
+  )
+
+# Set reference categories for later regression models
+adult_data <- adult_data %>%
+  mutate(
+    bmi_category = factor(
+      bmi_category,
+      levels = c("Normal weight", "Underweight", "Overweight", "Obesity")
+    ),
+    
+    diabetes = factor(
+      diabetes,
+      levels = c("No", "Yes")
+    ),
+    
+    smoking_status = factor(
+      smoking_status,
+      levels = c("Never", "Former", "Current")
+    )
+  )
+
+# Check distributions
+table(adult_data$bmi_category, useNA = "ifany")
+table(adult_data$diabetes, useNA = "ifany")
+table(adult_data$smoking_status, useNA = "ifany")
+
+# Examine sedentary time
+summary(adult_data$PAD680)
+
+
+
+
+
+
+
+
+
+
+# Convert to factors and specify reference categories
+adult_data <- adult_data %>%
+  mutate(
+    sex = factor(sex, levels = c("Female", "Male")),
+    age_group = factor(age_group,
+                       levels = c("20-39", "40-59", "60+"))
+  )
+
+# Check distributions
+table(adult_data$sex, useNA = "ifany")
+table(adult_data$age_group, useNA = "ifany")
+
+
+# ---------------------------------------------------------
+# Recode Race/Ethnicity and Education
+# ---------------------------------------------------------
+
+adult_data <- adult_data %>%
+  mutate(
+    
+    # Race/ethnicity
+    race_ethnicity = case_when(
+      RIDRETH3 == 1 ~ "Mexican American",
+      RIDRETH3 == 2 ~ "Other Hispanic",
+      RIDRETH3 == 3 ~ "Non-Hispanic White",
+      RIDRETH3 == 4 ~ "Non-Hispanic Black",
+      RIDRETH3 == 6 ~ "Non-Hispanic Asian",
+      RIDRETH3 == 7 ~ "Other/Multiracial",
+      TRUE ~ NA_character_
+    ),
+    
+    # Educational attainment among adults age 20+
+    education = case_when(
+      DMDEDUC2 == 1 ~ "Less than 9th grade",
+      DMDEDUC2 == 2 ~ "9-11th grade",
+      DMDEDUC2 == 3 ~ "High school/GED",
+      DMDEDUC2 == 4 ~ "Some college/AA",
+      DMDEDUC2 == 5 ~ "College graduate or above",
+      TRUE ~ NA_character_
+    )
+  )
+
+# Convert variables to factors and specify reference groups
+adult_data <- adult_data %>%
+  mutate(
+    race_ethnicity = factor(
+      race_ethnicity,
+      levels = c(
+        "Non-Hispanic White",
+        "Non-Hispanic Black",
+        "Mexican American",
+        "Other Hispanic",
+        "Non-Hispanic Asian",
+        "Other/Multiracial"
+      )
+    ),
+    
+    education = factor(
+      education,
+      levels = c(
+        "College graduate or above",
+        "Some college/AA",
+        "High school/GED",
+        "9-11th grade",
+        "Less than 9th grade"
+      )
+    )
+  )
+
+# Check distributions
+table(adult_data$race_ethnicity, useNA = "ifany")
+table(adult_data$education, useNA = "ifany")
+
+# ---------------------------------------------------------
+# Rebuild NHANES Survey Design
+# ---------------------------------------------------------
+
+# Recreate the survey design so that all newly derived
+# demographic, clinical, and behavioral variables are included.
+
+nhanes_design <- svydesign(
+  ids = ~SDMVPSU,
+  strata = ~SDMVSTRA,
+  weights = ~WTMEC2YR,
+  nest = TRUE,
+  data = adult_data
+)
+
+# Restrict to participants with a defined hypertension outcome
+htn_design <- subset(
+  nhanes_design,
+  !is.na(hypertension)
+)
+# ---------------------------------------------------------
+# Weighted Hypertension Prevalence by Demographic Group
+# ---------------------------------------------------------
+
+# By sex
+svyby(
+  ~hypertension,
+  ~sex,
+  design = htn_design,
+  FUN = svymean,
+  na.rm = TRUE,
+  vartype = c("ci")
+)
+
+# By age group
+svyby(
+  ~hypertension,
+  ~age_group,
+  design = htn_design,
+  FUN = svymean,
+  na.rm = TRUE,
+  vartype = c("ci")
+)
+
+# ---------------------------------------------------------
+# Weighted Hypertension Prevalence by Additional Risk Factors
+# ---------------------------------------------------------
+
+# Race/ethnicity
+svyby(
+  ~hypertension,
+  ~race_ethnicity,
+  design = htn_design,
+  FUN = svymean,
+  na.rm = TRUE,
+  vartype = "ci"
+)
+
+# BMI category
+svyby(
+  ~hypertension,
+  ~bmi_category,
+  design = htn_design,
+  FUN = svymean,
+  na.rm = TRUE,
+  vartype = "ci"
+)
+
+# Diabetes status
+svyby(
+  ~hypertension,
+  ~diabetes,
+  design = htn_design,
+  FUN = svymean,
+  na.rm = TRUE,
+  vartype = "ci"
+)
+
+# Smoking status
+svyby(
+  ~hypertension,
+  ~smoking_status,
+  design = htn_design,
+  FUN = svymean,
+  na.rm = TRUE,
+  vartype = "ci"
+)
+# Check survey design degrees of freedom
+degf(htn_design)
+
+# Check number of observations used in the model
+nobs(htn_model)
+
+# Check number of unique PSUs and strata
+length(unique(adult_data$SDMVPSU))
+length(unique(adult_data$SDMVSTRA))
+
+# ---------------------------------------------------------
+# Parsimonious Survey-Weighted Logistic Regression
+# ---------------------------------------------------------
+
+# Fit an adjusted model using major demographic and
+# cardiometabolic factors associated with hypertension.
+#
+# A parsimonious model is used because the NHANES survey
+# design provides limited degrees of freedom for variance
+# estimation.
+
+htn_model_reduced <- svyglm(
+  hypertension ~ age_group +
+    sex +
+    bmi_category +
+    diabetes,
+  design = htn_design,
+  family = quasibinomial()
+)
+
+summary(htn_model_reduced)
+
+
+# ---------------------------------------------------------
+# Adjusted Odds Ratios and 95% Confidence Intervals
+# ---------------------------------------------------------
+
+# Convert logistic regression coefficients from log-odds
+# to adjusted odds ratios.
+
+OR <- exp(coef(htn_model_reduced))
+CI <- exp(confint(htn_model_reduced))
+
+model_results <- data.frame(
+  Variable = names(OR),
+  Adjusted_OR = OR,
+  CI_Lower = CI[, 1],
+  CI_Upper = CI[, 2]
+)
+
+# Round only the numeric columns
+model_results %>%
+  mutate(
+    Adjusted_OR = round(Adjusted_OR, 3),
+    CI_Lower = round(CI_Lower, 3),
+    CI_Upper = round(CI_Upper, 3)
+  )
+
+# ---------------------------------------------------------
+# Adjusted Prevalence Ratios
+# ---------------------------------------------------------
+
+# Because hypertension is common in this population,
+# prevalence ratios provide an interpretable measure of
+# association for this cross-sectional analysis.
+
+htn_pr_model <- svyglm(
+  hypertension ~ age_group +
+    sex +
+    bmi_category +
+    diabetes,
+  design = htn_design,
+  family = quasipoisson(link = "log")
+)
+
+# Convert coefficients to adjusted prevalence ratios
+PR <- exp(coef(htn_pr_model))
+CI <- exp(confint(htn_pr_model))
+
+pr_results <- data.frame(
+  Variable = names(PR),
+  Adjusted_PR = PR,
+  CI_Lower = CI[, 1],
+  CI_Upper = CI[, 2]
+)
+
+pr_results %>%
+  mutate(
+    Adjusted_PR = round(Adjusted_PR, 3),
+    CI_Lower = round(CI_Lower, 3),
+    CI_Upper = round(CI_Upper, 3)
+  )
